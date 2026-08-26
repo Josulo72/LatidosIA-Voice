@@ -9,9 +9,10 @@ DATA = BASE/'data'; VOICE_ROOT = DATA/'voices'; OUT = BASE/'outputs'; TRAINING =
 for p in [VOICE_ROOT, OUT, TRAINING]: p.mkdir(parents=True, exist_ok=True)
 if not DB.exists(): DB.write_text('[]', encoding='utf-8')
 ORPHEUS_URL=os.getenv('ORPHEUS_URL','http://127.0.0.1:5005')
+LORA_INFERENCE_URL=os.getenv('LORA_INFERENCE_URL','http://127.0.0.1:5006')
 TRAIN_PYTHON=os.getenv('TRAIN_PYTHON',sys.executable)
 JOBS={}
-app=FastAPI(title='LatidosIA Voice Multi',version='1.2.0')
+app=FastAPI(title='LatidosIA Voice Multi',version='1.3.0')
 
 def load_db(): return json.loads(DB.read_text(encoding='utf-8'))
 def save_db(x): DB.write_text(json.dumps(x,ensure_ascii=False,indent=2),encoding='utf-8')
@@ -30,9 +31,12 @@ def patch_voice(voice_id, **changes):
 @app.get('/api/health')
 def health():
     try:
-        r=requests.get(f'{ORPHEUS_URL}/health',timeout=3); connected=r.ok
-    except Exception: connected=False
-    return {'app':True,'orpheus':connected,'url':ORPHEUS_URL,'version':'1.2.0'}
+        r=requests.get(f'{ORPHEUS_URL}/health',timeout=3); zero_shot=r.ok
+    except Exception: zero_shot=False
+    try:
+        lr=requests.get(f'{LORA_INFERENCE_URL}/health',timeout=3); lora=lr.ok; lora_info=lr.json() if lr.ok else {}
+    except Exception: lora=False; lora_info={}
+    return {'app':True,'orpheus':zero_shot,'lora_inference':lora,'lora_info':lora_info,'url':ORPHEUS_URL,'lora_url':LORA_INFERENCE_URL,'version':'1.3.0'}
 
 @app.get('/api/voices')
 def voices(): return load_db()
@@ -73,7 +77,7 @@ def delete_sample(voice_id:str,sample_id:str):
     if not v: raise HTTPException(404,'Voz no encontrada')
     s=next((x for x in v['samples'] if x['id']==sample_id),None)
     if not s: raise HTTPException(404,'Muestra no encontrada')
-    p=BASE/s['audio_path'];
+    p=BASE/s['audio_path']
     if p.exists(): p.unlink()
     v['samples']=[x for x in v['samples'] if x['id']!=sample_id]; v['training_status']='not_trained'; v['adapter_path']=None; save_db(db); return {'ok':True}
 
@@ -111,12 +115,10 @@ def training_status(voice_id:str):
         rc=proc.poll()
         if rc is None: status='training'
         elif rc==0:
-            adapter=TRAINING/'runs'/voice_id/'adapter'; status='trained'; patch_voice(voice_id,training_status='trained',adapter_path=str(adapter.relative_to(BASE)).replace('\\','/'),training_finished_at=int(time.time()))
-            JOBS.pop(voice_id,None)
+            adapter=TRAINING/'runs'/voice_id/'adapter'; status='trained'; patch_voice(voice_id,training_status='trained',adapter_path=str(adapter.relative_to(BASE)).replace('\\','/'),training_finished_at=int(time.time())); JOBS.pop(voice_id,None)
         else:
             status='failed'; patch_voice(voice_id,training_status='failed',training_finished_at=int(time.time())); JOBS.pop(voice_id,None)
-    log_text=''
-    lp=v.get('training_log')
+    log_text=''; v=get_voice(voice_id); lp=v.get('training_log')
     if lp and (BASE/lp).exists():
         try: log_text='\n'.join((BASE/lp).read_text(encoding='utf-8',errors='replace').splitlines()[-30:])
         except Exception: pass
@@ -126,21 +128,23 @@ def training_status(voice_id:str):
 def generate(payload:dict):
     text=(payload.get('text') or '').strip()
     if not text: raise HTTPException(400,'Falta el texto')
-    voice_id=payload.get('voice_id'); sample_id=payload.get('sample_id'); body={'input':text}
+    voice_id=payload.get('voice_id'); sample_id=payload.get('sample_id'); body={'input':text}; engine='zero-shot'; target=ORPHEUS_URL
     if voice_id:
         v=get_voice(voice_id)
-        # Adapter use depends on the inference server supporting voice_adapter. Otherwise fall back to zero-shot sample.
-        if v.get('adapter_path') and v.get('training_status')=='trained' and payload.get('use_adapter',True): body['voice_adapter']=str((BASE/v['adapter_path']).resolve())
+        if v.get('adapter_path') and v.get('training_status')=='trained' and payload.get('use_adapter',True):
+            body['voice_adapter']=str((BASE/v['adapter_path']).resolve()); target=LORA_INFERENCE_URL; engine='lora'
         else:
             if not v['samples']: raise HTTPException(400,'Esta voz no tiene muestras')
             s=next((x for x in v['samples'] if x['id']==sample_id),None) if sample_id else v['samples'][0]
             if not s: raise HTTPException(404,'Muestra no encontrada')
             body['ref_audio']=base64.b64encode((BASE/s['audio_path']).read_bytes()).decode('ascii'); body['ref_text']=s['transcript']
     else: body['voice']=payload.get('preset') or 'tara'
-    try: r=requests.post(f'{ORPHEUS_URL}/v1/audio/speech',json=body,timeout=600)
-    except Exception as e: raise HTTPException(503,f'Orpheus no disponible: {e}')
-    if not r.ok: raise HTTPException(r.status_code,r.text[:500])
-    fn=OUT/f'latidos_voice_{uuid.uuid4().hex[:8]}.wav'; fn.write_bytes(r.content); return {'ok':True,'url':f'/api/audio/{fn.name}','file':fn.name}
+    for k in ['temperature','top_p','repetition_penalty','max_new_tokens']:
+        if k in payload: body[k]=payload[k]
+    try: r=requests.post(f'{target}/v1/audio/speech',json=body,timeout=900)
+    except Exception as e: raise HTTPException(503,f'Motor {engine} no disponible: {e}')
+    if not r.ok: raise HTTPException(r.status_code,f'{engine}: {r.text[:500]}')
+    fn=OUT/f'latidos_voice_{uuid.uuid4().hex[:8]}.wav'; fn.write_bytes(r.content); return {'ok':True,'url':f'/api/audio/{fn.name}','file':fn.name,'engine':engine}
 
 @app.get('/api/audio/{filename}')
 def audio(filename:str):
