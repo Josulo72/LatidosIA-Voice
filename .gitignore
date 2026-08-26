@@ -1,4 +1,5 @@
 .venv/
+.venv-training/
 __pycache__/
 *.pyc
 outputs/*
@@ -7,4 +8,11 @@ data/voices/*
 !data/voices/.gitkeep
 data/voices.json
 training/*.jsonl
+training/runs/
+training/**/adapter/
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
 .env
