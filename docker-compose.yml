@@ -1,0 +1,22 @@
+services:
+  orpheus:
+    image: ghcr.io/orrinwitt/orpheus-tts:latest
+    container_name: latidosia-orpheus
+    ports: ["5005:5005"]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - MODEL_NAME=canopylabs/orpheus-3b-0.1-pretrained
+      - PORT=5005
+      - MAX_MODEL_LEN=4096
+    volumes:
+      - huggingface_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+volumes:
+  huggingface_cache:
