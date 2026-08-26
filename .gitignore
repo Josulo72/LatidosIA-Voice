@@ -1,5 +1,6 @@
 .venv/
 .venv-training/
+.venv-inference/
 __pycache__/
 *.pyc
 outputs/*
